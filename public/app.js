@@ -35,6 +35,7 @@ let saveSettingsTimeout = null;
 let updatingSettingsForm = false;
 
 const BASE_TILT_RAD = (15 * Math.PI) / 180;
+const TWO_PI = Math.PI * 2;
 
 let rotation = { x: 0, y: 0, z: 0 };
 let rotationVelocity = { x: 0, y: 0.02, z: 0 };
@@ -367,6 +368,11 @@ function updateDrawStatus() {
   drawStatusElement.textContent = `${availableParticipants.length} participant${availableParticipants.length === 1 ? '' : 's'} ready for the next draw.`;
 }
 
+function wrapAngle(angle) {
+  const wrapped = ((angle + Math.PI) % TWO_PI + TWO_PI) % TWO_PI;
+  return wrapped - Math.PI;
+}
+
 function setTargetVelocity(x, y, z = targetVelocity.z) {
   targetVelocity = { x, y, z };
 }
@@ -379,6 +385,17 @@ function animateSphere() {
   rotation.x += rotationVelocity.x;
   rotation.y += rotationVelocity.y;
   rotation.z += rotationVelocity.z;
+
+  const aligningToIdle = Math.abs(targetVelocity.x) < 0.0001 && Math.abs(targetVelocity.z) < 0.0001;
+
+  if (aligningToIdle) {
+    rotation.x += (0 - rotation.x) * 0.08;
+    rotation.z += (0 - rotation.z) * 0.08;
+  }
+
+  rotation.x = wrapAngle(rotation.x);
+  rotation.y = wrapAngle(rotation.y);
+  rotation.z = wrapAngle(rotation.z);
 
   sphereElement.style.transform =
     `rotateX(${BASE_TILT_RAD}rad) rotateZ(${rotation.z}rad) rotateX(${rotation.x}rad) rotateY(${rotation.y}rad)`;
