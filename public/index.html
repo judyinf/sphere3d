@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Participant Roster Manager</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Participant Roster Manager</h1>
+      <p>Manage departments, import participant rosters, and run random draws.</p>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Add Department</h2>
+        <form id="add-department-form">
+          <label for="department-name">Department name</label>
+          <div class="form-row">
+            <input id="department-name" name="department-name" type="text" required placeholder="e.g. Marketing" />
+            <button type="submit">Add</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Import Participants from CSV</h2>
+        <form id="import-form">
+          <label for="csv-file">CSV file</label>
+          <input id="csv-file" type="file" accept=".csv" required />
+
+          <label for="import-department">Choose existing department (optional)</label>
+          <select id="import-department">
+            <option value="">-- Select --</option>
+          </select>
+
+          <label for="import-new-department">Or create a new department</label>
+          <input id="import-new-department" type="text" placeholder="New department name" />
+
+          <label for="import-mode">Import mode</label>
+          <select id="import-mode">
+            <option value="replace">Replace existing participants</option>
+            <option value="append">Append missing participants</option>
+          </select>
+
+          <button type="submit">Import CSV</button>
+        </form>
+        <p class="helper-text">CSV files should include a <strong>name</strong> column and optionally an <strong>email</strong> column.</p>
+      </section>
+
+      <section class="panel actions">
+        <button id="draw-button" class="primary">Run Draw</button>
+        <button id="reset-button" class="danger">Reset All Data</button>
+      </section>
+
+      <section class="panel">
+        <h2>Departments &amp; Participants</h2>
+        <div id="roster"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Latest Draw</h2>
+        <div id="draw-results"></div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
