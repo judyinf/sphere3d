@@ -5,12 +5,21 @@ const { randomUUID } = require('crypto');
 const dataDir = path.join(__dirname, 'data');
 const statePath = path.join(dataDir, 'state.json');
 
+const defaultSettings = Object.freeze({
+  durationSeconds: 10,
+  stopMode: 'auto',
+  participantsPerDraw: 3,
+  musicMuted: false
+});
+
 const defaultState = Object.freeze({
   departments: [],
+  settings: defaultSettings,
   drawResults: {
     timestamp: null,
-    pairs: []
-  }
+    winners: []
+  },
+  drawHistory: []
 });
 
 let state = loadState();
@@ -27,14 +36,117 @@ function loadState() {
   try {
     const raw = fs.readFileSync(statePath, 'utf8');
     const parsed = JSON.parse(raw);
-    return {
-      departments: Array.isArray(parsed.departments) ? parsed.departments : [],
-      drawResults: parsed.drawResults || clone(defaultState.drawResults)
-    };
+    return hydrateState(parsed);
   } catch (error) {
     console.warn('Failed to read persisted state, using defaults.', error);
     return clone(defaultState);
   }
+}
+
+function hydrateState(parsed) {
+  const departments = Array.isArray(parsed.departments)
+    ? parsed.departments.map(hydrateDepartment)
+    : [];
+
+  const settings = sanitizeSettings(parsed.settings);
+
+  const drawHistory = Array.isArray(parsed.drawHistory)
+    ? parsed.drawHistory.map(hydrateHistoryEntry).filter(Boolean)
+    : [];
+
+  const drawResults = hydrateDrawResults(parsed.drawResults, drawHistory);
+
+  return {
+    departments,
+    settings,
+    drawResults,
+    drawHistory
+  };
+}
+
+function hydrateDepartment(department) {
+  const safeName = (() => {
+    try {
+      return ensureDepartmentName(department && department.name ? department.name : '');
+    } catch (error) {
+      return 'Department';
+    }
+  })();
+
+  const participants = Array.isArray(department && department.participants)
+    ? department.participants.map((participant) => ensureParticipant(participant, { keepDrawn: true }))
+    : [];
+
+  return {
+    id: department && department.id ? String(department.id) : createId(),
+    name: safeName,
+    participants
+  };
+}
+
+function hydrateDrawResults(drawResults, history) {
+  if (drawResults && Array.isArray(drawResults.winners)) {
+    return {
+      timestamp: drawResults.timestamp ? new Date(drawResults.timestamp).toISOString() : null,
+      winners: drawResults.winners.map(hydrateWinner).filter(Boolean)
+    };
+  }
+
+  if (drawResults && Array.isArray(drawResults.pairs)) {
+    const winners = drawResults.pairs
+      .flat()
+      .filter(Boolean)
+      .map((participant) => hydrateWinner({
+        participantId: participant.participantId || participant.id,
+        name: participant.name,
+        email: participant.email,
+        departmentId: participant.departmentId,
+        departmentName: participant.departmentName
+      }))
+      .filter(Boolean);
+
+    const timestamp = drawResults.timestamp || (history[0] ? history[0].timestamp : null);
+
+    return {
+      timestamp,
+      winners
+    };
+  }
+
+  return clone(defaultState.drawResults);
+}
+
+function hydrateHistoryEntry(entry) {
+  if (!entry || !Array.isArray(entry.winners) || !entry.winners.length) {
+    return null;
+  }
+
+  return {
+    id: entry.id || createId(),
+    timestamp: entry.timestamp ? new Date(entry.timestamp).toISOString() : new Date().toISOString(),
+    winners: entry.winners.map(hydrateWinner).filter(Boolean)
+  };
+}
+
+function hydrateWinner(winner) {
+  if (!winner) {
+    return null;
+  }
+
+  const name = typeof winner.name === 'string' ? winner.name.trim() : '';
+  if (!name) {
+    return null;
+  }
+
+  const email = winner.email ? String(winner.email).trim() : null;
+
+  return {
+    participantId: winner.participantId || winner.id || createId(),
+    name,
+    email: email || null,
+    departmentId: winner.departmentId || null,
+    departmentName: winner.departmentName ? String(winner.departmentName).trim() : ''
+  };
 }
 
 function persistState() {
@@ -52,19 +164,24 @@ function ensureDepartmentName(name) {
   return name.trim();
 }
 
-function ensureParticipant(participant) {
+function ensureParticipant(participant, { keepDrawn = false } = {}) {
   if (!participant || typeof participant !== 'object') {
     throw new Error('Participant payload must be an object.');
   }
+
   const name = typeof participant.name === 'string' ? participant.name.trim() : '';
   if (!name) {
     throw new Error('Participant name is required.');
   }
+
   const email = participant.email ? String(participant.email).trim() : null;
+  const drawn = keepDrawn && typeof participant.drawn === 'boolean' ? participant.drawn : false;
+
   return {
-    id: participant.id || createId(),
+    id: participant.id || participant.participantId || createId(),
     name,
-    email: email || null
+    email: email || null,
+    drawn
   };
 }
 
@@ -81,6 +198,38 @@ function getRoster() {
   };
 }
 
+function getSettings() {
+  return clone(state.settings);
+}
+
+function updateSettings(partial = {}) {
+  const next = sanitizeSettings({ ...state.settings, ...partial });
+  state.settings = next;
+  persistState();
+  return getSettings();
+}
+
+function sanitizeSettings(settings = {}) {
+  const sanitized = clone(defaultSettings);
+
+  const duration = Number(settings.durationSeconds);
+  if (Number.isFinite(duration) && duration > 0) {
+    sanitized.durationSeconds = Math.min(Math.round(duration), 600);
+  }
+
+  const participants = Number(settings.participantsPerDraw);
+  if (Number.isFinite(participants) && participants > 0) {
+    sanitized.participantsPerDraw = Math.min(Math.round(participants), 1000);
+  }
+
+  const stopMode = settings.stopMode === 'manual' ? 'manual' : 'auto';
+  sanitized.stopMode = stopMode;
+
+  sanitized.musicMuted = Boolean(settings.musicMuted);
+
+  return sanitized;
+}
+
 function findDepartmentById(id) {
   return state.departments.find((dept) => dept.id === id);
 }
@@ -93,13 +242,13 @@ function findDepartmentByName(name) {
 function addDepartment(name, participants = []) {
   const departmentName = ensureDepartmentName(name);
   if (findDepartmentByName(departmentName)) {
-    throw new Error(`Department \"${departmentName}\" already exists.`);
+    throw new Error(`Department "${departmentName}" already exists.`);
   }
 
   const department = {
     id: createId(),
     name: departmentName,
-    participants: participants.map(ensureParticipant)
+    participants: participants.map((participant) => ensureParticipant(participant))
   };
 
   state.departments.push(department);
@@ -123,71 +272,115 @@ function updateDepartment(id, updates = {}) {
   }
 
   if (Array.isArray(updates.participants)) {
-    department.participants = updates.participants.map(ensureParticipant);
+    department.participants = updates.participants.map((participant) =>
+      ensureParticipant(participant, { keepDrawn: Boolean(participant.drawn) })
+    );
   }
 
   persistState();
   return clone(department);
 }
 
-function parseCsv(csvText) {
-  if (typeof csvText !== 'string' || !csvText.trim()) {
-    throw new Error('CSV content is required.');
-  }
-
-  const lines = csvText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  if (lines.length === 0) {
+function parseSingleDepartmentCsv(csvText) {
+  const lines = normalizeCsvLines(csvText);
+  if (!lines.length) {
     throw new Error('CSV file did not contain any rows.');
   }
 
   const headers = splitCsvLine(lines[0]).map((header) => header.toLowerCase());
-  const headerHasName = headers.includes('name') || headers.includes('participant') || headers.includes('participant name');
+  const potentialNameHeaders = ['name', 'participant', 'participant name'];
+  let nameIndex = headers.findIndex((header) => potentialNameHeaders.includes(header));
 
-  const rows = [];
-  const startIndex = headerHasName ? 1 : 0;
-  const nameIndex = headerHasName
-    ? (() => {
-        const potential = ['name', 'participant', 'participant name'];
-        for (const key of potential) {
-          const idx = headers.indexOf(key);
-          if (idx !== -1) {
-            return idx;
-          }
-        }
-        return 0;
-      })()
-    : 0;
+  let dataStartIndex = 0;
 
-  const emailIndex = headerHasName ? headers.indexOf('email') : 1;
+  if (nameIndex === -1) {
+    nameIndex = 0;
+  } else {
+    dataStartIndex = 1;
+  }
 
-  const columnMappings = { name: nameIndex, email: emailIndex };
+  const emailIndex = headers.indexOf('email');
 
-  for (let i = startIndex; i < lines.length; i += 1) {
+  const participants = [];
+
+  for (let i = dataStartIndex; i < lines.length; i += 1) {
     const columns = splitCsvLine(lines[i]);
-    const name = columns[columnMappings.name] ? columns[columnMappings.name].trim() : '';
-    const email = columnMappings.email !== -1 && columns[columnMappings.email]
-      ? columns[columnMappings.email].trim()
-      : '';
+    const name = columns[nameIndex] ? columns[nameIndex].trim() : '';
     if (!name) {
       continue;
     }
-    rows.push(
-      ensureParticipant({
-        name,
-        email
-      })
-    );
+    const email = emailIndex !== -1 && columns[emailIndex] ? columns[emailIndex].trim() : null;
+    participants.push(ensureParticipant({ name, email }));
   }
 
-  if (!rows.length) {
+  if (!participants.length) {
     throw new Error('No participants were found in the CSV data.');
   }
 
-  return rows;
+  return participants;
+}
+
+function parseMultiDepartmentCsv(csvText) {
+  const lines = normalizeCsvLines(csvText);
+  if (!lines.length) {
+    throw new Error('CSV file did not contain any rows.');
+  }
+
+  const headerColumns = splitCsvLine(lines[0]);
+  const departments = headerColumns
+    .map((value, index) => ({ name: value ? value.trim() : '', index }))
+    .filter(({ name }) => name.length > 0);
+
+  if (!departments.length) {
+    throw new Error('CSV header must contain department names.');
+  }
+
+  const participantsByDepartment = new Map();
+  departments.forEach(({ name }) => {
+    participantsByDepartment.set(name, []);
+  });
+
+  for (let rowIndex = 1; rowIndex < lines.length; rowIndex += 1) {
+    const columns = splitCsvLine(lines[rowIndex]);
+
+    departments.forEach(({ name, index }) => {
+      const raw = columns[index] ? columns[index].trim() : '';
+      if (!raw) {
+        return;
+      }
+
+      const parsed = parseNameAndEmail(raw);
+      participantsByDepartment.get(name).push(ensureParticipant(parsed));
+    });
+  }
+
+  return participantsByDepartment;
+}
+
+function parseNameAndEmail(value) {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(.*)<([^>]+)>$/);
+  if (match) {
+    return { name: match[1].trim(), email: match[2].trim() };
+  }
+
+  const pipeSplit = trimmed.split('|');
+  if (pipeSplit.length === 2) {
+    return { name: pipeSplit[0].trim(), email: pipeSplit[1].trim() };
+  }
+
+  return { name: trimmed };
+}
+
+function normalizeCsvLines(csvText) {
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    throw new Error('CSV content is required.');
+  }
+
+  return csvText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 function splitCsvLine(line) {
@@ -224,8 +417,63 @@ function splitCsvLine(line) {
   return result;
 }
 
-function importCsv({ csvText, departmentId, departmentName, mode = 'replace' }) {
-  const participants = parseCsv(csvText);
+function applyParticipantsToDepartment(department, participants, mode) {
+  const normalizedMode = mode === 'append' ? 'append' : 'replace';
+  const prepared = participants.map((participant) => ({ ...participant, drawn: false }));
+
+  if (normalizedMode === 'replace') {
+    department.participants = prepared;
+    return;
+  }
+
+  const existingByKey = new Map();
+  department.participants.forEach((participant) => {
+    existingByKey.set(createParticipantKey(participant), participant);
+  });
+
+  prepared.forEach((participant) => {
+    const key = createParticipantKey(participant);
+    if (!existingByKey.has(key)) {
+      department.participants.push(participant);
+      existingByKey.set(key, participant);
+    }
+  });
+}
+
+function createParticipantKey(participant) {
+  return (participant.email ? participant.email.toLowerCase() : participant.name.toLowerCase());
+}
+
+function importCsv({ csvText, departmentId, departmentName, mode = 'replace', multiDepartment = false }) {
+  const normalizedMode = mode === 'append' ? 'append' : 'replace';
+
+  if (multiDepartment || (!departmentId && !departmentName)) {
+    const participantsByDepartment = parseMultiDepartmentCsv(csvText);
+
+    if (!participantsByDepartment.size) {
+      throw new Error('The CSV did not contain any departments.');
+    }
+
+    participantsByDepartment.forEach((participants, name) => {
+      const existing = findDepartmentByName(name);
+      let departmentReference = existing;
+
+      if (!departmentReference) {
+        const created = addDepartment(name);
+        departmentReference = findDepartmentById(created.id);
+      }
+
+      if (!departmentReference) {
+        return;
+      }
+
+      applyParticipantsToDepartment(departmentReference, participants, normalizedMode);
+    });
+
+    persistState();
+    return getRoster();
+  }
+
   let department = null;
 
   if (departmentId) {
@@ -249,27 +497,8 @@ function importCsv({ csvText, departmentId, departmentName, mode = 'replace' }) 
     throw new Error('Specify an existing department or provide a department name.');
   }
 
-  if (mode !== 'replace' && mode !== 'append') {
-    throw new Error('Import mode must be either "replace" or "append".');
-  }
-
-  if (mode === 'replace') {
-    department.participants = participants;
-  } else {
-    const existingByKey = new Map();
-    department.participants.forEach((participant) => {
-      const key = participant.email ? participant.email.toLowerCase() : participant.name.toLowerCase();
-      existingByKey.set(key, participant);
-    });
-
-    participants.forEach((participant) => {
-      const key = participant.email ? participant.email.toLowerCase() : participant.name.toLowerCase();
-      if (!existingByKey.has(key)) {
-        department.participants.push(participant);
-        existingByKey.set(key, participant);
-      }
-    });
-  }
+  const participants = parseSingleDepartmentCsv(csvText);
+  applyParticipantsToDepartment(department, participants, normalizedMode);
 
   persistState();
   return clone(department);
@@ -278,44 +507,88 @@ function importCsv({ csvText, departmentId, departmentName, mode = 'replace' }) 
 function reset() {
   state = clone(defaultState);
   persistState();
-  return getRoster();
+  return {
+    roster: getRoster(),
+    settings: getSettings(),
+    drawResults: getDrawResults(),
+    history: getHistory()
+  };
 }
 
 function getDrawResults() {
   return clone(state.drawResults);
 }
 
+function getAvailableParticipants() {
+  const available = [];
+
+  state.departments.forEach((department) => {
+    department.participants.forEach((participant) => {
+      if (!participant.drawn) {
+        available.push({ department, participant });
+      }
+    });
+  });
+
+  return available;
+}
+
 function createDraw() {
-  const participants = state.departments.flatMap((department) =>
-    department.participants.map((participant) => ({
+  const available = getAvailableParticipants();
+
+  if (!available.length) {
+    throw new Error('All participants have already been drawn. Reset to start over.');
+  }
+
+  const targetCount = Math.max(1, Math.min(state.settings.participantsPerDraw, available.length));
+  const winnersPool = sample(available, targetCount);
+
+  const winners = winnersPool.map(({ department, participant }) => {
+    participant.drawn = true;
+    return {
       participantId: participant.id,
       name: participant.name,
       email: participant.email,
       departmentId: department.id,
       departmentName: department.name
-    }))
-  );
+    };
+  });
 
-  const shuffled = shuffle(participants);
-  const pairs = [];
-
-  for (let i = 0; i < shuffled.length; i += 2) {
-    const first = shuffled[i];
-    const second = shuffled[i + 1];
-    if (first && second) {
-      pairs.push([first, second]);
-    } else if (first) {
-      pairs.push([first]);
-    }
-  }
-
-  state.drawResults = {
-    timestamp: new Date().toISOString(),
-    pairs
-  };
+  const timestamp = new Date().toISOString();
+  state.drawResults = { timestamp, winners };
+  state.drawHistory.unshift({ id: createId(), timestamp, winners: clone(winners) });
 
   persistState();
   return getDrawResults();
+}
+
+function getHistory() {
+  return clone(state.drawHistory);
+}
+
+function exportHistory() {
+  const history = getHistory();
+  const header = ['timestamp', 'participant', 'department', 'email'];
+  const rows = history.flatMap((entry) =>
+    entry.winners.map((winner) => [entry.timestamp, winner.name, winner.departmentName, winner.email || ''])
+  );
+
+  const csvRows = [header, ...rows].map((columns) =>
+    columns
+      .map((value) => {
+        const safe = value === null || value === undefined ? '' : String(value);
+        const escaped = safe.replace(/"/g, '""');
+        return `"${escaped}"`;
+      })
+      .join(',')
+  );
+
+  return csvRows.join('\n');
+}
+
+function sample(list, count) {
+  const shuffled = shuffle(list);
+  return shuffled.slice(0, count);
 }
 
 function shuffle(list) {
@@ -329,10 +602,14 @@ function shuffle(list) {
 
 module.exports = {
   getRoster,
+  getSettings,
+  updateSettings,
   addDepartment,
   updateDepartment,
   importCsv,
   reset,
   getDrawResults,
-  createDraw
+  createDraw,
+  getHistory,
+  exportHistory
 };

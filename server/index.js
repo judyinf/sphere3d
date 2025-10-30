@@ -18,6 +18,23 @@ app.get('/api/roster', (req, res) => {
   }
 });
 
+app.get('/api/settings', (req, res) => {
+  try {
+    res.json(store.getSettings());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/settings', (req, res) => {
+  try {
+    const settings = store.updateSettings(req.body || {});
+    res.json(settings);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/departments', (req, res) => {
   try {
     const { name } = req.body || {};
@@ -41,8 +58,8 @@ app.put('/api/departments/:id', (req, res) => {
 
 app.post('/api/import', (req, res) => {
   try {
-    const department = store.importCsv(req.body || {});
-    res.json(department);
+    const result = store.importCsv(req.body || {});
+    res.json(result);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -50,8 +67,8 @@ app.post('/api/import', (req, res) => {
 
 app.post('/api/reset', (req, res) => {
   try {
-    const roster = store.reset();
-    res.json(roster);
+    const data = store.reset();
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -70,6 +87,26 @@ app.post('/api/draw', (req, res) => {
   try {
     const results = store.createDraw();
     res.json(results);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/history', (req, res) => {
+  try {
+    const history = store.getHistory();
+    res.json(history);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/history/export', (req, res) => {
+  try {
+    const csv = store.exportHistory();
+    res.header('Content-Type', 'text/csv');
+    res.header('Content-Disposition', 'attachment; filename="draw-history.csv"');
+    res.send(csv);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

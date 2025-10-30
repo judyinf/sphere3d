@@ -1,18 +1,138 @@
 const rosterContainer = document.getElementById('roster');
-const drawContainer = document.getElementById('draw-results');
+const historyContainer = document.getElementById('history-list');
+const latestWinnersContainer = document.getElementById('latest-winners');
+const sphereElement = document.getElementById('sphere');
+const drawStatusElement = document.getElementById('draw-status');
+const toast = document.getElementById('toast');
+
 const addDepartmentForm = document.getElementById('add-department-form');
 const departmentInput = document.getElementById('department-name');
 const importForm = document.getElementById('import-form');
 const csvInput = document.getElementById('csv-file');
-const importDepartmentSelect = document.getElementById('import-department');
-const importNewDepartmentInput = document.getElementById('import-new-department');
 const importModeSelect = document.getElementById('import-mode');
-const drawButton = document.getElementById('draw-button');
+
+const settingsForm = document.getElementById('settings-form');
+const durationInput = document.getElementById('duration-seconds');
+const stopModeInputs = settingsForm.querySelectorAll('input[name="stop-mode"]');
+const participantsInput = document.getElementById('participants-per-draw');
+const musicToggle = document.getElementById('music-muted');
+
+const startButton = document.getElementById('start-draw');
+const stopButton = document.getElementById('stop-draw');
 const resetButton = document.getElementById('reset-button');
-const toast = document.getElementById('toast');
+const exportHistoryButton = document.getElementById('export-history');
 
 let departments = [];
+let settings = null;
 let drawResults = null;
+let history = [];
+let availableParticipants = [];
+
+let isDrawing = false;
+let drawInFlight = false;
+let stopTimer = null;
+let saveSettingsTimeout = null;
+let updatingSettingsForm = false;
+
+let rotation = { x: 0, y: 0 };
+let rotationVelocity = { x: 0.01, y: 0.02 };
+let targetVelocity = { x: 0.01, y: 0.02 };
+let animationFrame = null;
+
+class BackgroundMusic {
+  constructor() {
+    this.context = null;
+    this.gain = null;
+    this.oscillators = [];
+    this.isMuted = false;
+    this.isPlaying = false;
+  }
+
+  async ensureContext() {
+    if (!this.context) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        throw new Error('Web Audio API not supported.');
+      }
+      this.context = new AudioCtx();
+    }
+
+    if (this.context.state === 'suspended') {
+      await this.context.resume();
+    }
+  }
+
+  async play() {
+    if (this.isMuted || this.isPlaying) {
+      return;
+    }
+
+    try {
+      await this.ensureContext();
+    } catch (error) {
+      console.warn('Audio unavailable:', error);
+      return;
+    }
+
+    const context = this.context;
+    this.gain = context.createGain();
+    this.gain.gain.setValueAtTime(0.0001, context.currentTime);
+    this.gain.gain.exponentialRampToValueAtTime(0.03, context.currentTime + 1.5);
+    this.gain.connect(context.destination);
+
+    const frequencies = [196, 246.94, 311.13];
+    const oscillators = frequencies.map((frequency, index) => {
+      const oscillator = context.createOscillator();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, context.currentTime);
+      const localGain = context.createGain();
+      localGain.gain.setValueAtTime(0.0001, context.currentTime);
+      localGain.gain.exponentialRampToValueAtTime(0.25 / frequencies.length, context.currentTime + 2 + index * 0.25);
+      oscillator.connect(localGain).connect(this.gain);
+      oscillator.start(context.currentTime + index * 0.15);
+      return { oscillator, localGain };
+    });
+
+    this.oscillators = oscillators;
+    this.isPlaying = true;
+  }
+
+  stop() {
+    if (!this.context || !this.isPlaying) {
+      return;
+    }
+
+    const context = this.context;
+    const now = context.currentTime;
+
+    if (this.gain) {
+      this.gain.gain.cancelScheduledValues(now);
+      this.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+    }
+
+    this.oscillators.forEach(({ oscillator }) => {
+      try {
+        oscillator.stop(now + 0.6);
+      } catch (error) {
+        /* noop */
+      }
+    });
+
+    setTimeout(() => {
+      this.oscillators = [];
+      this.isPlaying = false;
+    }, 800);
+  }
+
+  setMuted(muted) {
+    this.isMuted = Boolean(muted);
+    if (this.isMuted) {
+      this.stop();
+    }
+  }
+}
+
+const backgroundMusic = new BackgroundMusic();
 
 async function request(url, options = {}) {
   const { method = 'GET', headers, ...rest } = options;
@@ -36,21 +156,54 @@ async function loadRoster() {
   const data = await request('/api/roster');
   departments = data.departments || [];
   renderRoster();
-  updateImportOptions();
+  renderSphere();
+  updateDrawStatus();
+}
+
+async function loadSettings() {
+  const data = await request('/api/settings');
+  settings = data;
+  renderSettings();
 }
 
 async function loadDrawResults() {
   const data = await request('/api/draw');
   drawResults = data;
-  renderDrawResults();
+  renderLatestWinners();
+}
+
+async function loadHistory() {
+  const data = await request('/api/history');
+  history = Array.isArray(data) ? data : [];
+  renderHistory();
+}
+
+function renderSettings() {
+  if (!settings) {
+    return;
+  }
+
+  updatingSettingsForm = true;
+  durationInput.value = settings.durationSeconds;
+  participantsInput.value = settings.participantsPerDraw;
+  musicToggle.checked = Boolean(settings.musicMuted);
+
+  stopModeInputs.forEach((input) => {
+    input.checked = input.value === settings.stopMode;
+  });
+  updatingSettingsForm = false;
+
+  backgroundMusic.setMuted(settings.musicMuted);
+  updateButtonStates();
 }
 
 function renderRoster() {
   rosterContainer.innerHTML = '';
+
   if (!departments.length) {
     const empty = document.createElement('p');
     empty.className = 'empty';
-    empty.textContent = 'No departments yet. Add one to get started.';
+    empty.textContent = 'No departments yet. Add one or import a CSV to get started.';
     rosterContainer.appendChild(empty);
     return;
   }
@@ -66,13 +219,18 @@ function renderRoster() {
     if (!department.participants.length) {
       const empty = document.createElement('p');
       empty.className = 'empty';
-      empty.textContent = 'No participants imported yet.';
+      empty.textContent = 'No participants yet.';
       section.appendChild(empty);
     } else {
       const list = document.createElement('ul');
       department.participants.forEach((participant) => {
         const item = document.createElement('li');
-        item.textContent = participant.email ? `${participant.name} (${participant.email})` : participant.name;
+        const label = participant.email ? `${participant.name} (${participant.email})` : participant.name;
+        item.textContent = label;
+        if (participant.drawn) {
+          item.classList.add('drawn');
+          item.title = 'Already drawn';
+        }
         list.appendChild(item);
       });
       section.appendChild(list);
@@ -82,56 +240,160 @@ function renderRoster() {
   });
 }
 
-function renderDrawResults() {
-  drawContainer.innerHTML = '';
-  if (!drawResults || !drawResults.pairs || !drawResults.pairs.length) {
+function renderSphere() {
+  sphereElement.innerHTML = '';
+  availableParticipants = [];
+
+  departments.forEach((department) => {
+    department.participants.forEach((participant) => {
+      if (!participant.drawn) {
+        availableParticipants.push({ department, participant });
+      }
+    });
+  });
+
+  if (!availableParticipants.length) {
+    sphereElement.classList.add('sphere--empty');
     const empty = document.createElement('p');
     empty.className = 'empty';
-    empty.textContent = 'Run a draw to see pairings.';
-    drawContainer.appendChild(empty);
+    empty.textContent = 'All participants have been drawn.';
+    sphereElement.appendChild(empty);
+    updateButtonStates();
     return;
   }
 
-  if (drawResults.timestamp) {
-    const timestamp = document.createElement('p');
-    const date = new Date(drawResults.timestamp);
-    timestamp.className = 'timestamp';
-    timestamp.textContent = `Generated ${date.toLocaleString()}`;
-    drawContainer.appendChild(timestamp);
+  sphereElement.classList.remove('sphere--empty');
+
+  const total = availableParticipants.length;
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  availableParticipants.forEach(({ participant }, index) => {
+    const y = 1 - (index / (total - 1 || 1)) * 2;
+    const radius = Math.sqrt(1 - y * y);
+    const theta = goldenAngle * index;
+
+    const x = Math.cos(theta) * radius;
+    const z = Math.sin(theta) * radius;
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'sphere-name';
+    nameEl.textContent = participant.name;
+    nameEl.style.setProperty('--tx', `${x * 150}px`);
+    nameEl.style.setProperty('--ty', `${y * 150}px`);
+    nameEl.style.setProperty('--tz', `${z * 150}px`);
+
+    sphereElement.appendChild(nameEl);
+  });
+
+  startAnimation();
+  updateButtonStates();
+}
+
+function renderLatestWinners() {
+  latestWinnersContainer.innerHTML = '';
+
+  if (!drawResults || !Array.isArray(drawResults.winners) || !drawResults.winners.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'Run a draw to reveal the winners here.';
+    latestWinnersContainer.appendChild(empty);
+    return;
   }
 
+  const timestamp = document.createElement('p');
+  timestamp.className = 'timestamp';
+  timestamp.textContent = `Last draw: ${new Date(drawResults.timestamp).toLocaleString()}`;
+  latestWinnersContainer.appendChild(timestamp);
+
   const list = document.createElement('ol');
-  drawResults.pairs.forEach((pair) => {
+  list.className = 'winners';
+
+  drawResults.winners.forEach((winner) => {
     const item = document.createElement('li');
-    item.className = 'pair';
-    if (pair.length === 2) {
-      item.textContent = `${formatParticipant(pair[0])} ↔ ${formatParticipant(pair[1])}`;
-    } else {
-      item.textContent = `${formatParticipant(pair[0])} has no match`;
-    }
+    item.innerHTML = `<strong>${winner.name}</strong> <span>${winner.departmentName}${winner.email ? ` • ${winner.email}` : ''}</span>`;
     list.appendChild(item);
   });
 
-  drawContainer.appendChild(list);
+  latestWinnersContainer.appendChild(list);
 }
 
-function formatParticipant(participant) {
-  const base = participant.email ? `${participant.name} (${participant.email})` : participant.name;
-  return `${base} – ${participant.departmentName}`;
-}
+function renderHistory() {
+  historyContainer.innerHTML = '';
 
-function updateImportOptions() {
-  const previous = importDepartmentSelect.value;
-  importDepartmentSelect.innerHTML = '<option value="">-- Select --</option>';
-  departments.forEach((department) => {
-    const option = document.createElement('option');
-    option.value = department.id;
-    option.textContent = department.name;
-    importDepartmentSelect.appendChild(option);
-  });
-  if (departments.some((dept) => dept.id === previous)) {
-    importDepartmentSelect.value = previous;
+  if (!history.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'No draws have been recorded yet.';
+    historyContainer.appendChild(empty);
+    return;
   }
+
+  const list = document.createElement('ol');
+  list.className = 'history';
+
+  history.forEach((entry) => {
+    const item = document.createElement('li');
+    item.className = 'history-item';
+
+    const header = document.createElement('div');
+    header.className = 'history-item__header';
+    header.innerHTML = `<time datetime="${entry.timestamp}">${new Date(entry.timestamp).toLocaleString()}</time>`;
+    item.appendChild(header);
+
+    const winnersList = document.createElement('ul');
+    winnersList.className = 'history-item__winners';
+
+    entry.winners.forEach((winner) => {
+      const winnerItem = document.createElement('li');
+      winnerItem.innerHTML = `<strong>${winner.name}</strong><span>${winner.departmentName}${winner.email ? ` • ${winner.email}` : ''}</span>`;
+      winnersList.appendChild(winnerItem);
+    });
+
+    item.appendChild(winnersList);
+    list.appendChild(item);
+  });
+
+  historyContainer.appendChild(list);
+}
+
+function updateDrawStatus() {
+  if (!availableParticipants.length) {
+    drawStatusElement.textContent = 'All participants have been drawn. Reset to start over or import more names.';
+    return;
+  }
+
+  drawStatusElement.textContent = `${availableParticipants.length} participant${availableParticipants.length === 1 ? '' : 's'} ready for the next draw.`;
+}
+
+function setTargetVelocity(x, y) {
+  targetVelocity = { x, y };
+}
+
+function animateSphere() {
+  rotationVelocity.x += (targetVelocity.x - rotationVelocity.x) * 0.08;
+  rotationVelocity.y += (targetVelocity.y - rotationVelocity.y) * 0.08;
+
+  rotation.x += rotationVelocity.x;
+  rotation.y += rotationVelocity.y;
+
+  sphereElement.style.transform = `rotateX(${rotation.x}rad) rotateY(${rotation.y}rad)`;
+
+  animationFrame = requestAnimationFrame(animateSphere);
+}
+
+function startAnimation() {
+  if (animationFrame) {
+    return;
+  }
+  animationFrame = requestAnimationFrame(animateSphere);
+}
+
+function stopAnimation() {
+  if (!animationFrame) {
+    return;
+  }
+  cancelAnimationFrame(animationFrame);
+  animationFrame = null;
 }
 
 function showToast(message, type = 'info') {
@@ -142,6 +404,56 @@ function showToast(message, type = 'info') {
     toast.className = '';
   }, 3000);
 }
+
+function updateButtonStates() {
+  const hasParticipants = availableParticipants.length > 0;
+  startButton.disabled = !hasParticipants || isDrawing || drawInFlight;
+  stopButton.disabled = !isDrawing;
+}
+
+function queueSettingsSave() {
+  clearTimeout(saveSettingsTimeout);
+  saveSettingsTimeout = setTimeout(async () => {
+    try {
+      const payload = {
+        durationSeconds: Number(durationInput.value),
+        stopMode: settingsForm.elements['stop-mode'].value,
+        participantsPerDraw: Number(participantsInput.value),
+        musicMuted: musicToggle.checked
+      };
+      const updated = await request('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+      settings = updated;
+      renderSettings();
+      showToast('Settings saved.', 'success');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }, 250);
+}
+
+settingsForm.addEventListener('input', () => {
+  if (updatingSettingsForm) {
+    return;
+  }
+  queueSettingsSave();
+});
+
+settingsForm.addEventListener('change', () => {
+  if (updatingSettingsForm) {
+    return;
+  }
+  queueSettingsSave();
+});
+
+musicToggle.addEventListener('change', () => {
+  if (settings) {
+    settings.musicMuted = musicToggle.checked;
+    backgroundMusic.setMuted(settings.musicMuted);
+  }
+});
 
 addDepartmentForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -167,65 +479,146 @@ addDepartmentForm.addEventListener('submit', async (event) => {
 importForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = csvInput.files[0];
-  const departmentId = importDepartmentSelect.value;
-  const newDepartmentName = importNewDepartmentInput.value.trim();
-  const mode = importModeSelect.value;
-
   if (!file) {
     showToast('Please choose a CSV file.', 'error');
     return;
   }
 
-  if (!departmentId && !newDepartmentName) {
-    showToast('Select an existing department or enter a new department name.', 'error');
-    return;
-  }
-
   try {
     const csvText = await file.text();
-    const payload = { csvText, mode };
-    if (departmentId) {
-      payload.departmentId = departmentId;
-    }
-    if (newDepartmentName) {
-      payload.departmentName = newDepartmentName;
-    }
+    const payload = {
+      csvText,
+      mode: importModeSelect.value,
+      multiDepartment: true
+    };
+
     await request('/api/import', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
+
     importForm.reset();
-    showToast('Participants imported successfully.', 'success');
-    await loadRoster();
+    showToast('Roster updated from CSV.', 'success');
+    await Promise.all([loadRoster(), loadHistory()]);
   } catch (error) {
     showToast(error.message, 'error');
   }
 });
 
-drawButton.addEventListener('click', async () => {
-  try {
-    drawResults = await request('/api/draw', { method: 'POST' });
-    renderDrawResults();
-    showToast('New draw generated.', 'success');
-  } catch (error) {
-    showToast(error.message, 'error');
+startButton.addEventListener('click', async () => {
+  if (isDrawing || drawInFlight) {
+    return;
+  }
+
+  if (!availableParticipants.length) {
+    showToast('No participants are available for drawing.', 'error');
+    return;
+  }
+
+  isDrawing = true;
+  updateButtonStates();
+  drawStatusElement.textContent =
+    settings.stopMode === 'auto'
+      ? `Drawing in progress. Automatically stopping in ${settings.durationSeconds} seconds...`
+      : 'Drawing in progress. Press Stop Draw to reveal the winners.';
+
+  setTargetVelocity(0.5, 0.85);
+
+  if (!settings.musicMuted) {
+    await backgroundMusic.play();
+  }
+
+  if (settings.stopMode === 'auto') {
+    stopTimer = setTimeout(() => {
+      stopDraw({ auto: true }).catch((error) => console.error(error));
+    }, settings.durationSeconds * 1000);
   }
 });
+
+stopButton.addEventListener('click', () => {
+  stopDraw().catch((error) => console.error(error));
+});
+
+async function stopDraw({ auto = false } = {}) {
+  if (!isDrawing && !drawInFlight) {
+    return;
+  }
+
+  if (stopTimer) {
+    clearTimeout(stopTimer);
+    stopTimer = null;
+  }
+
+  if (isDrawing) {
+    drawStatusElement.textContent = auto ? 'Automatic stop triggered...' : 'Stopping draw...';
+  }
+
+  isDrawing = false;
+  drawInFlight = true;
+  updateButtonStates();
+  setTargetVelocity(0.08, 0.12);
+  backgroundMusic.stop();
+
+  try {
+    const result = await request('/api/draw', { method: 'POST' });
+    drawResults = result;
+    showToast('Winners selected!', 'success');
+    await Promise.all([loadRoster(), loadHistory()]);
+    renderLatestWinners();
+    updateDrawStatus();
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    drawInFlight = false;
+    updateButtonStates();
+  }
+}
 
 resetButton.addEventListener('click', async () => {
-  const confirmed = window.confirm('This will delete all departments, participants, and draw results. Continue?');
+  const confirmed = window.confirm(
+    'This will erase all departments, participants, settings, and draw history. Continue?'
+  );
   if (!confirmed) {
     return;
   }
 
   try {
-    await request('/api/reset', { method: 'POST' });
-    departments = [];
-    drawResults = null;
+    const data = await request('/api/reset', { method: 'POST' });
+    departments = data.roster ? data.roster.departments || [] : [];
+    settings = data.settings || settings;
+    drawResults = data.drawResults || null;
+    history = data.history || [];
+
+    renderSettings();
     renderRoster();
-    renderDrawResults();
-    updateImportOptions();
+    renderSphere();
+    renderLatestWinners();
+    renderHistory();
+    updateDrawStatus();
+
     showToast('All data has been reset.', 'success');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+exportHistoryButton.addEventListener('click', async () => {
+  try {
+    const response = await fetch('/api/history/export');
+    if (!response.ok) {
+      throw new Error('Failed to export history.');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const date = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `draw-history-${date}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showToast('History exported.', 'success');
   } catch (error) {
     showToast(error.message, 'error');
   }
@@ -233,10 +626,17 @@ resetButton.addEventListener('click', async () => {
 
 (async function init() {
   try {
-    await loadRoster();
-    await loadDrawResults();
+    await Promise.all([loadSettings(), loadRoster(), loadDrawResults(), loadHistory()]);
+    setTargetVelocity(0.02, 0.035);
+    startAnimation();
+    updateDrawStatus();
   } catch (error) {
     console.error(error);
     showToast('Failed to load initial data.', 'error');
   }
 })();
+
+window.addEventListener('beforeunload', () => {
+  stopAnimation();
+  backgroundMusic.stop();
+});
