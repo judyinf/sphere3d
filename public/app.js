@@ -34,9 +34,11 @@ let stopTimer = null;
 let saveSettingsTimeout = null;
 let updatingSettingsForm = false;
 
-let rotation = { x: 0, y: 0 };
-let rotationVelocity = { x: 0.01, y: 0.02 };
-let targetVelocity = { x: 0.01, y: 0.02 };
+const BASE_TILT_RAD = (15 * Math.PI) / 180;
+
+let rotation = { x: 0, y: 0, z: 0 };
+let rotationVelocity = { x: 0, y: 0, z: 0.02 };
+let targetVelocity = { x: 0, y: 0, z: 0.02 };
 let animationFrame = null;
 
 class BackgroundMusic {
@@ -365,18 +367,21 @@ function updateDrawStatus() {
   drawStatusElement.textContent = `${availableParticipants.length} participant${availableParticipants.length === 1 ? '' : 's'} ready for the next draw.`;
 }
 
-function setTargetVelocity(x, y) {
-  targetVelocity = { x, y };
+function setTargetVelocity(x, y, z = targetVelocity.z) {
+  targetVelocity = { x, y, z };
 }
 
 function animateSphere() {
   rotationVelocity.x += (targetVelocity.x - rotationVelocity.x) * 0.08;
   rotationVelocity.y += (targetVelocity.y - rotationVelocity.y) * 0.08;
+  rotationVelocity.z += (targetVelocity.z - rotationVelocity.z) * 0.08;
 
   rotation.x += rotationVelocity.x;
   rotation.y += rotationVelocity.y;
+  rotation.z += rotationVelocity.z;
 
-  sphereElement.style.transform = `rotateX(${rotation.x}rad) rotateY(${rotation.y}rad)`;
+  sphereElement.style.transform =
+    `rotateX(${BASE_TILT_RAD}rad) rotateZ(${rotation.z}rad) rotateX(${rotation.x}rad) rotateY(${rotation.y}rad)`;
 
   animationFrame = requestAnimationFrame(animateSphere);
 }
@@ -522,7 +527,7 @@ startButton.addEventListener('click', async () => {
       ? `Drawing in progress. Automatically stopping in ${settings.durationSeconds} seconds...`
       : 'Drawing in progress. Press Stop Draw to reveal the winners.';
 
-  setTargetVelocity(0.5, 0.85);
+  setTargetVelocity(0.5, 0.85, 1.2);
 
   if (!settings.musicMuted) {
     await backgroundMusic.play();
@@ -556,7 +561,7 @@ async function stopDraw({ auto = false } = {}) {
   isDrawing = false;
   drawInFlight = true;
   updateButtonStates();
-  setTargetVelocity(0.08, 0.12);
+  setTargetVelocity(0, 0, 0.05);
   backgroundMusic.stop();
 
   try {
@@ -627,7 +632,7 @@ exportHistoryButton.addEventListener('click', async () => {
 (async function init() {
   try {
     await Promise.all([loadSettings(), loadRoster(), loadDrawResults(), loadHistory()]);
-    setTargetVelocity(0.02, 0.035);
+    setTargetVelocity(0, 0, 0.025);
     startAnimation();
     updateDrawStatus();
   } catch (error) {
