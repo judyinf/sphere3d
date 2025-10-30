@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sphere Draw Manager</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Sphere Draw Manager</h1>
+      <p>
+        Configure draw duration and music, manage multi-department rosters, and watch names orbit in a 3D sphere
+        before the winners are revealed.
+      </p>
+    </header>
+
+    <main>
+      <section class="panel" aria-labelledby="controls-heading">
+        <div class="panel-header">
+          <h2 id="controls-heading">Draw Settings &amp; Controls</h2>
+          <button id="reset-button" class="danger" type="button">Reset Everything</button>
+        </div>
+        <form id="settings-form" class="settings-form">
+          <div class="field-group">
+            <label for="duration-seconds">Duration (seconds)</label>
+            <input id="duration-seconds" name="duration-seconds" type="number" min="1" max="600" step="1" required />
+          </div>
+          <fieldset class="field-group">
+            <legend>Stop mode</legend>
+            <label class="option">
+              <input type="radio" name="stop-mode" value="auto" />
+              Automatic stop
+            </label>
+            <label class="option">
+              <input type="radio" name="stop-mode" value="manual" />
+              Manual stop
+            </label>
+          </fieldset>
+          <div class="field-group">
+            <label for="participants-per-draw">Participants drawn per round</label>
+            <input id="participants-per-draw" name="participants-per-draw" type="number" min="1" max="1000" step="1" required />
+          </div>
+          <label class="field-group toggle" for="music-muted">
+            <span>Mute background music</span>
+            <input id="music-muted" name="music-muted" type="checkbox" />
+          </label>
+        </form>
+        <div class="control-buttons">
+          <button id="start-draw" class="primary" type="button">Start Draw</button>
+          <button id="stop-draw" class="secondary" type="button" disabled>Stop Draw</button>
+        </div>
+        <p class="helper-text">
+          Automatic stop mode will end the draw after the configured duration. Manual stop mode keeps the sphere
+          spinning until you press <strong>Stop Draw</strong>.
+        </p>
+        <div id="draw-status" class="draw-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="sphere-heading">
+        <h2 id="sphere-heading">Drawing Sphere</h2>
+        <div class="sphere-stage">
+          <div id="sphere" class="sphere" aria-live="polite"></div>
+        </div>
+        <div id="latest-winners" class="latest-winners" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="import-heading">
+        <h2 id="import-heading">Multi-Department CSV Import</h2>
+        <form id="import-form">
+          <label class="field-group" for="csv-file">CSV file</label>
+          <input id="csv-file" type="file" accept=".csv" required />
+
+          <label class="field-group" for="import-mode">Import mode</label>
+          <select id="import-mode" name="import-mode">
+            <option value="replace">Replace existing participants</option>
+            <option value="append">Append missing participants</option>
+          </select>
+
+          <button type="submit" class="primary">Import CSV</button>
+        </form>
+        <p class="helper-text">
+          The first row of the CSV must list department names. Each column under a department should contain one
+          participant name per line. Optionally include email addresses using <code>Name | email@example.com</code> or
+          <code>Name &lt;email@example.com&gt;</code>.
+        </p>
+      </section>
+
+      <section class="panel" aria-labelledby="departments-heading">
+        <h2 id="departments-heading">Departments &amp; Participants</h2>
+        <form id="add-department-form" class="add-department">
+          <label class="sr-only" for="department-name">Department name</label>
+          <input id="department-name" name="department-name" type="text" placeholder="e.g. Marketing" required />
+          <button type="submit">Add Department</button>
+        </form>
+        <div id="roster"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="history-heading">
+        <div class="panel-header">
+          <h2 id="history-heading">Draw History</h2>
+          <button id="export-history" type="button" class="secondary">Export CSV</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
